@@ -14,3 +14,5 @@ vehicles <- read.csv(text = x)
 view(accidents)
 view(casualties)
 view(vehicles)
+
+accidents %>% mutate(year = year(Date)) %>% group_by(year) %>% summarise(count= n())
