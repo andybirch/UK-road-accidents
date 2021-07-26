@@ -8,7 +8,6 @@ toc: TRUE
 
 ```{r setup, include=FALSE}
 # Set global options and formatting
-start_tm <- Sys.time()
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,  fig.show = "hold")
 knitr::knit_hooks$set(inline = function(x) { if(!is.numeric(x)){ x }else{ prettyNum(round(x,2), big.mark=",") } })
 options(knitr.table.format = "latex")
@@ -1470,8 +1469,3 @@ If it were possible to access additional data, the following may be helpful to i
 -   *Underlying health conditions of casualties* -- some casualties may have underlying health issues (e.g. be more susceptible to a heart attack) or be taking medication (e.g. blood thinners) that could increase the likelihood of sustaining serious injuries in a collision.
 
 It may also be insightful to extend the analysis with the current data features by considering additional machine learning algorithms (e.g boosting techniques, including AdaBoost), alternative time periods or different types of accident (e.g. single vehicle accidents).
-
-```{r run time, echo = FALSE}
-end_tm <- Sys.time()
-end_tm - start_tm
-```

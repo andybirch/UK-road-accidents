@@ -1031,7 +1031,3 @@ chart2 <- ens_class_count %>% ggplot(aes(x = pred)) + geom_bar(aes(fill = actual
   labs(x = "Number of positive predictions", y = "Number of casualties")
 
 grid.arrange(chart1, chart2, ncol = 2)
-
-##########
-end_tm <- Sys.time()
-end_tm - start_tm
