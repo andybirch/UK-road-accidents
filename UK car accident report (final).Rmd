@@ -1,0 +1,1478 @@
+---
+title: "Factors affecting severity of injuries in UK car accidents"
+author: "Andy Birch"
+date: "26/07/2021"
+output: pdf_document
+toc: TRUE
+---
+
+```{r setup, include=FALSE}
+# Set global options and formatting
+start_tm <- Sys.time()
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,  fig.show = "hold")
+knitr::knit_hooks$set(inline = function(x) { if(!is.numeric(x)){ x }else{ prettyNum(round(x,2), big.mark=",") } })
+options(knitr.table.format = "latex")
+KableTidy = function(x) {
+  knitr::kable(x, format = "latex", format.args = list(decimal.mark = '.', big.mark = ",",booktabs = TRUE), align = "c", digits = 3) %>% kable_styling(latex_options = c("striped", "hold_position"), font_size = 8)
+}
+
+chart_col_1 <- "#008B61"
+chart_col_2 <- "#BA328B"
+chart_back <- "#DBDBD3"
+options(digits = 3)
+```
+
+```{r load packages, include = FALSE}
+# Install and load packages
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("readr", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("RCurl", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("stringer", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("rpart", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("rpart.plot", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("kableExtra", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("mice", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("VIM", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("adabag", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("gbm", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("e1071", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("grid", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(readr)
+library(lubridate)
+library(RCurl)
+library(caret)
+library(stringr)
+library(rpart)
+library(rpart.plot)
+library(kableExtra)
+library(mice)
+library(VIM)
+library(randomForest)
+library(adabag)
+library(gbm)
+library(e1071)
+library(gridExtra)
+library(grid)
+```
+
+\pagebreak
+
+# 1. Introduction
+
+This report presents an analysis of the factors affecting the severity of injuries sustained as a result of road traffic accidents in the United Kingdom. The data originates from the UK Department of Transport, but has been sourced from a Kaggle dataset [^1]. The full data is very large, so in order to keep the processing times manageable, only accidents from 2014 involving two vehicles have been analysed. This is discussed further in the following section and still provides an ample number of observations to perform this analysis.
+
+[^1]: <https://www.kaggle.com/benoit72/uk-accidents-10-years-history-with-many-variables>
+
+The objective is to develop a model that will identify the key factors that affect *casualty_severity* (the target variable), which is the seriousness of injuries sustained in an accident and make predictions when the severity is unknown. The real life application of this analysis could include educating drivers about the main risks, or assisting the emergency services prioritise their response to such accidents.
+
+The *sensitivity* and *specificity* of models will be one way that their predictive power will be assessed, as they measure the proportion of serious or slight injuries correctly predicted respectively. It will be important to score highly on both metrics, so the mean of both scores (*balanced accuracy*) will also be considered.
+
+However, the primary metric used to measure success against this objective will be *precision*, which is the proportion of predictions called as "positive" (a serious injury), that were serious injuries in reality. This measure is key because it factors in prevalence, which is the proportion of observations that have a serious casualty. In this case prevalence is very low, so we will need to achieve very strong levels of both *sensitivity* and *specificity* to avoid false positives swamping the true positives.
+
+A low precision score will indicate that a model has little practical use, as there will be a low probability of a casualty actually being seriously injured when such a severity is predicted.
+
+```{r download data, include = FALSE}
+# Download data from GitHub
+url <- getURL("https://raw.githubusercontent.com/andybirch/UK-road-accidents/master/accidents.csv")
+accidents <- read.csv(text = url)
+url <- getURL("https://raw.githubusercontent.com/andybirch/UK-road-accidents/master/casualties.csv")
+casualties <- read.csv(text = url)
+url <- getURL("https://raw.githubusercontent.com/andybirch/UK-road-accidents/master/vehicles.csv")
+vehicles <- read.csv(text = url)
+```
+
+```{r create full dataset, include = FALSE}
+#Join three datasets into one
+full_data <- casualties %>% left_join(vehicles, by = c("Accident_Index", "Vehicle_Reference")) %>% 
+  left_join(accidents, by = "Accident_Index")
+```
+
+\pagebreak
+
+# 2. Data structure
+
+The full dataset available from Kaggle is very large (both in terms of observations and features) and in order for this analysis to be performed on a home computer only a subset will be used. The dataset also needs to be uploaded to GitHub for others to be able to repeat the analysis, which again means that the size of the dataset needs to be reduced significantly. Whilst the size is reduced, there are still `r nrow(full_data)` observations, which is comfortably large enough to conduct a thorough analysis. The following restrictions were used to create the dataset to be used:
+
+-   *Year of accident = 2014*. The full dataset includes accidents between 2005 and 2014, but one year is ample data
+
+-   *Accidents involving two vehicles*. The analysis considers features of the vehicle in which the casualty was travelling and the other vehicle involved in the accident. Some accidents involved 3 or more vehicles, including these would make the analysis significantly more complex
+
+-   *Exclude some vehicle types*. Only accidents solely involving pedal bikes, motorbikes, cars and goods vehicles have been included. A small number of number of accidents involved trams, farmyard vehicles, horses etc, including all these vehicle types would created a large number of features
+
+-   *Exclude some features*. The full dataset contains 70 features, many of which are categorical with multiple values, which would create a huge number of features when encoded to be used in models. Features were removed where they were not useful for the intended analysis (location, police force name), were very poorly populated or provided little information as the vast majority of observations had the same value (i.e. is car left hand drive?).
+
+The *casualty_severity* has three levels in the raw data - slight, serious and fatal. In this analysis the latter two levels have been combined for two reasons. Firstly the incidence of fatal casualties is very low at `r mean(full_data$Casualty_Severity == 1) * 100`% which exacerbates the issue of prevalence. Secondly, and most importantly, there are a number of factors that could affect if a seriously injured casualty dies that are not captured in the data, including the response time of emergency services and the quality of care received in hospital. Therefore reducing the problem to a binary classification (was the casualty seriously injured or not) will increase the strength of the model and usefulness of predictions.
+
+The data is initially held in three different tables with the following features:
+
+[**Accidents**]{.ul}
+
++-------------------------+---------------------------------------------------------------+
+| Field                   | Description                                                   |
++=========================+===============================================================+
+| Accident_Index          | Unique identifier for each accident                           |
++-------------------------+---------------------------------------------------------------+
+| Date                    | Date of the accident                                          |
++-------------------------+---------------------------------------------------------------+
+| Time                    | Time of the accident                                          |
++-------------------------+---------------------------------------------------------------+
+| Road_Class              | Class of road (motorway, "A" road, "B" road etc)              |
++-------------------------+---------------------------------------------------------------+
+| Road_Type               | Type of road (dual carriageway, single carriageway etc)       |
++-------------------------+---------------------------------------------------------------+
+| Speed_limit             | Legal speed limit for road in mph                             |
++-------------------------+---------------------------------------------------------------+
+| Junction_Detail         | Type of junction (roundabout, t junction, not a junction etc) |
++-------------------------+---------------------------------------------------------------+
+| Light_Conditions        | Combination of natural daylight and street lighting           |
++-------------------------+---------------------------------------------------------------+
+| Weather_Conditions      | Combination of precipitation (rain, snow etc), wind and fog   |
++-------------------------+---------------------------------------------------------------+
+| Road_Surface_Conditions | Was road wet, icy, covered by snow etc                        |
++-------------------------+---------------------------------------------------------------+
+
+\pagebreak
+
+[**Vehicles**]{.ul}
+
++-----------------------------+---------------------------------------------------------------------------------+
+| Field                       | Description                                                                     |
++=============================+=================================================================================+
+| Accident_Index              | Unique identifier for each accident                                             |
++-----------------------------+---------------------------------------------------------------------------------+
+| Vehicle_Reference           | Unique number for each vehicle involved in the accident                         |
++-----------------------------+---------------------------------------------------------------------------------+
+| Vehicle_Type                | Type of vehicle (pedal bike, motorbike, car, HGV etc)                           |
++-----------------------------+---------------------------------------------------------------------------------+
+| Vehicle_Manoeuvre           | Type of maneouvre vehicle performing (turning, overturning, stopping, none etc) |
++-----------------------------+---------------------------------------------------------------------------------+
+| Skidding_and_Overturning    | Did vehicle skid, jackknife and / or overturn?                                  |
++-----------------------------+---------------------------------------------------------------------------------+
+| Vehicle_Leaving_Carriageway | Where did vehicle leave carriageway (nearside, offside, did not leave etc)      |
++-----------------------------+---------------------------------------------------------------------------------+
+| Hit_Object_off_Carriageway  | Did vehicle hit object when off the carriageway?                                |
++-----------------------------+---------------------------------------------------------------------------------+
+| First_Point_of_Impact       | Was initial impact on front, back, nearside, offside etc?                       |
++-----------------------------+---------------------------------------------------------------------------------+
+| Sex_of_Driver               | Sex of the driver                                                               |
++-----------------------------+---------------------------------------------------------------------------------+
+| Age_of_Driver               | Age of the driver                                                               |
++-----------------------------+---------------------------------------------------------------------------------+
+
+[**Casualties**]{.ul}
+
++--------------------+-------------------------------------------------------------+
+| Field              | Description                                                 |
++====================+=============================================================+
+| Accident_Index     | Unique identifier for each accident                         |
++--------------------+-------------------------------------------------------------+
+| Vehicle_Reference  | Unique number for each vehicle involved in the accident     |
++--------------------+-------------------------------------------------------------+
+| Casualty_Reference | Unique number for each casualty in the vehicle              |
++--------------------+-------------------------------------------------------------+
+| Casualty_Class     | Was casualty a driver, passenger or pedestrian              |
++--------------------+-------------------------------------------------------------+
+| Sex_of_Casualty    | Sex of the casualty                                         |
++--------------------+-------------------------------------------------------------+
+| Age_of_Casualty    | Age of the casualty                                         |
++--------------------+-------------------------------------------------------------+
+| Casualty_Severity  | Was casualty seriously injured? This is the target variable |
++--------------------+-------------------------------------------------------------+
+| Car_Passenger      | Was car passenger sat in the front or rear?                 |
++--------------------+-------------------------------------------------------------+
+
+The vehicle data includes some features that relate to the other car involved in the accident, indicated with the suffix "\_B". For example *Age_of_Driver* shows the age of the driver in which the casualty was travelling, whereas *Age_of_Driver_B* is the age of the driver of the other car involved in the accident.
+
+The casualty data is joined to the vehicle data using the *Accident_Index* and *Vehicle_Reference*, the accident data is subsequently joined on the *Accident_Index*. This creates a single dataset with `r ncol(full_data)` columns and `r nrow(full_data)` rows.
+
+Some features have numerical values that indicate missing information (e.g. "not known"), these are replaced with NAs to correctly identify them as missing and allow corrective actions to be taken.
+
+At this point the data is split into a training set and a test set. The former will be 90% of the observations and will be used to tune and test different models and the latter will only be used for the final evaluation of the chosen model.
+
+```{r create the test and train sets, include = FALSE}
+### Change casualty severity to 2 levels
+full_data <- full_data %>% 
+  mutate(Casualty_Severity = as.factor(ifelse(Casualty_Severity == 3, 0, 1))) #%>%   
+  #filter(month(Date) == 1)
+
+# Replace all the missing data values with NAs (includes unknown, not known etc)
+full_data[full_data == -1] <- NA
+full_data$Sex_of_Driver <- na_if(full_data$Sex_of_Driver,3)
+full_data$Sex_of_Driver_B <- na_if(full_data$Sex_of_Driver_B,3)
+full_data$Road_Type <- na_if(full_data$Road_Type,9)
+full_data$Weather_Conditions <- na_if(full_data$Weather_Conditions, 8)
+full_data$Weather_Conditions <- na_if(full_data$Weather_Conditions, 9)
+
+## Split into train and test sets
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = full_data$Casualty_Severity, times = 1, p = 0.1, list = FALSE)
+train_set <- full_data[-test_index,]
+test_set <- full_data[test_index,]
+```
+
+\pagebreak
+
+# 3. Exploratory data analysis
+
+## Data overview
+
+The following table shows the class, number of distinct values and the presence of missing values for each variable:
+
+```{r basic variable info, echo = FALSE}
+# Show basic info about each variable
+data.frame(Type = sapply(train_set, class), 
+           Distinct_values = sapply(train_set, n_distinct), 
+           Missing_values = sapply(train_set, function(x) sum(is.na(x)))) %>% 
+           KableTidy
+```
+
+Several fields have missing values, this will be corrected before any models are constructed. The target variable *Casualty_Severity* is a factor with 2 levels as discussed previously and the majority of the other variables are integer, which will work well with the packages used in this analysis. There is some further preparation of the data before it can be used for modelling, this is discussed in the next section. The majority of variables contain a small number of unique values that represent values for categorical features.
+
+As noted previously, the target variable is heavily unbalanced in the data:
+
+```{r data imbalance, echo = FALSE}
+# Show the imbalance in the target variable
+train_set %>% group_by(Casualty_Severity) %>% summarise(count = n()) %>% KableTidy
+```
+
+The prevalence of serious injuries is just `r mean(full_data$Casualty_Severity == 1) * 100`%, so any model will need to achieve very high accuracy to provide useful predictions.
+
+## Checking for outliers
+
+The majority of features are categorical and the values that they contain all map directly to descriptions provided in the data guide provided via Kaggle. This guide can also be found on the GitHub repo for this analysis. Therefore we know that there are no erroneous values for these features.
+
+We can visualise the distribution of numerical features to check for outliers. Firstly looking at *Age_of_Driver*, we can see `r sum(train_set$Age_of_Driver < 16, na.rm = TRUE)` values below 16 years of age, which is below the legal driving age in the UK. This chart shows the distribution casualties by driver age, limited to drivers aged 25 years and younger:
+
+```{r Outliers for drivers age, echo = FALSE, out.width = '50%', fig.align = 'center', fig.cap = 'Number of casualties by drivers age'}
+# Chart to show number of drivers who aren't legally allowed to drive
+train_set %>% ggplot(aes(x = Age_of_Driver)) + geom_bar(fill = chart_col_1) +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid"), axis.text = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5)),
+      axis.title.y = element_text(size = rel(1.5))) +
+  scale_x_continuous(breaks = seq(0,25,5)) +
+  xlim(1,26) +
+  labs(x = "Age of driver", y = "Number of casualties")
+
+# If driver age is below 16, then set to 16
+train_set$Age_of_Driver <- ifelse(train_set$Age_of_Driver < 16, 16, train_set$Age_of_Driver)
+train_set$Age_of_Driver_B <- ifelse(train_set$Age_of_Driver_B < 16, 16, train_set$Age_of_Driver_B)
+
+```
+
+It is possible that accidents involved people driving at an illegal age, but it has been assumed that these values are more likely a result of data errors. Therefore any values below 16 years, for *Age_of_Driver* and *Age_of_Driver_B*, have been set to 16.
+
+The distribution of the number of accidents by week number shows no areas of concern. The box-plot below highlights three outliers with low values, but the bar chart helps explain the reason. The two most extreme outliers are for week number 1 and 53, both of which were only 4 days. And weeks 52 and 53 would be expected to be lower due to the Christmas holidays, leading to fewer people travelling on the roads for business or leisure purposes.
+
+```{r checking dates, echo = FALSE, fig.width = 7, fig.height=3, fig.align = 'center', fig.cap = 'Number of casualties by week in the year', hold_position = TRUE}
+# Check distribution of casualties by date
+chart1 <- train_set %>% mutate(weekno = week(Date)) %>%  ggplot(aes(x = weekno)) + 
+  geom_bar(fill = chart_col_1) +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid")) +
+  scale_x_continuous(breaks = seq(0,52,10)) +  
+  labs(x = "Week number", y = "Number of casualties")
+
+chart2 <- train_set %>% mutate(weekno = week(Date)) %>% group_by(weekno) %>% 
+  summarise(accidents = n()) %>% 
+  ggplot(aes(y = accidents)) + 
+  geom_boxplot(fill = chart_col_1) +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid"), axis.text.x=element_blank()) +
+  labs(x = "", y = "Number of casualties")
+
+grid.arrange(chart1, chart2, ncol = 2)
+```
+
+\pagebreak
+
+A quick check of the distribution of accidents by time of day also shows a logical pattern without any outliers. There are far fewer accidents in the early hours of the morning when the majority of the population are at home, but the number increases rapidly as people start their morning commute, peaking in the 8 o'clock hour. The number of accidents then quickly declines and then increases again, reaching a peak in the 17 o'clock hour with the evening rush hour. The number of accidents steadily declines hour by hour into the night.
+
+```{r checking times, echo = FALSE, out.width = '50%', fig.align = 'center', fig.cap = 'Number of casualties by hour in the day'}
+# Check distribution of casualties by time of day
+train_set %>% mutate(hour = hour(hms(Time))) %>%  ggplot(aes(x = hour)) + 
+  geom_bar(fill = chart_col_1) +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid"), axis.text = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5)),
+      axis.title.y = element_text(size = rel(1.5))) +
+  scale_x_continuous(breaks = seq(0,23,4)) +  
+  labs(x = "Hour of the day", y = "Number of casualties")
+```
+
+## Predictive power of features
+
+The perceived wisdom is that speed, driver inexperience and sex of drivers are all factors in the severity of accidents, we can see how will this is supported by our data.
+
+Starting with speed, we are provided with the legal speed limit for the road on which the accident occurred, although unfortunately we cannot know that actual speed of the vehicles. The chart below shows the proportion of casualties that were classified as serious, split by speed limit. It shows a clear upward trend as the speed limit increases, until 70 miles per hour when it suddenly declines. This could be due to the type of road and the safety features they include, a central reservation for example that prevents cars crossing into oncoming traffic. If the combination of road speed and type is important, then it may be used by the models used later in this analysis.
+
+```{r severity vs road speed, echo = FALSE, out.width = '50%', fig.align = 'center', fig.cap = 'Proportion of casualties by severity and speed limit'}
+# Relationship between casualty severity and speed limit
+train_set %>% ggplot(aes(x = as.factor(Speed_limit))) + 
+  geom_bar(aes(fill = Casualty_Severity), position = "fill")+
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid"), axis.text = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5)),
+      axis.title.y = element_text(size = rel(1.5)), 
+      legend.text=element_text(size = rel(1.5)),  
+      legend.title=element_text(size = rel(1.5))) + 
+  labs(x = "Road speed limit (mph)", y = "Proportion of casualties")
+```
+
+Applying the same analysis to the age of the driver (of vehicle in which the casualty was travelling) we can see that the rate of serious casualties does initially decline as the age of the driver increases. However it then consistently increases from about 40 years and up, which could be as a result of older people being more susceptible to serious injuries from a crash than younger people. Again, such a combination of features could be used in the models developed later.
+
+```{r severity vs age of driver, echo = FALSE, out.width = '50%', fig.align = 'center', fig.cap = 'Proportion of casualties split by severity and age of driver'}
+# Relationship between casualty severity and driver age
+train_set %>% ggplot(aes(x = Age_of_Driver)) + 
+  geom_histogram(aes(fill = Casualty_Severity), position = "fill") +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid"), axis.text = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5)),
+      axis.title.y = element_text(size = rel(1.5)), 
+      legend.text=element_text(size = rel(1.5)),  
+      legend.title=element_text(size = rel(1.5))) +
+  labs(x = "Age of driver", y = "Proportion of casualties")
+```
+
+```{r severity vs sex of driver, include= FALSE }
+# Relationship between casualty severity and sex of driver
+cont_table <- table(sex = train_set$Sex_of_Driver, severity = train_set$Casualty_Severity)
+male <- cont_table[1,2] / sum(cont_table[1,])
+female <- cont_table[2,2] / sum(cont_table[2,])
+```
+
+Turning now to the sex of the driver where we observe a far larger proportion of casualties where the driver was male resulted in serious injuries at `r male * 100`%, compared to `r female * 100`% for female drivers. Such a difference in proportions suggests that it could be of practical significance and a chi squared test confirms that the result is statistically significant:
+
+```{r chi squared on driver sex, echo = FALSE}
+# Chi squared test to see if difference between sexes is statistically significant
+chisq.test(cont_table)
+```
+
+This brief analysis suggests that there are several features that could provide effective predictive power for potential models, which is encouraging, and we could continue investigating all of the features in this manner. Indeed it seems reasonable to expect that many of the other features could also be factors in casualty severity, including road conditions, vehicle type, light conditions and so on. Such analysis would be quite time consuming however and would not show if they will provide sufficient accuracy to be of any practical use. The only way to test this is to go ahead and start building models and analysing their outputs.
+
+\pagebreak
+
+# 4. Data preparation
+
+Before models can be built there are a few more steps of data preparation that need to be undertaken.
+
+Firstly many machine learning models will not run with missing values, therefore the missing data has been imputed with the help of the MICE package.
+
+```{r deal with missing data in training set, include = FALSE}
+# Use imputation to fill in missing data
+train_set$Time <- as.numeric(hms(train_set$Time)) # Convert time to numeric to allow imputation
+imp_init = mice(train_set, maxit=0) 
+imp_meth = imp_init$method
+imp_pred_matrix = imp_init$predictorMatrix
+imp_pred_matrix[, c("Accident_Index", "Vehicle_Reference", "Casualty_Reference")]=0
+
+set.seed(1)
+imputed = mice(train_set, method=imp_meth, predictorMatrix=imp_pred_matrix, m=5)
+train_set <- complete(imputed)
+```
+
+The next task is to create new features to capture the cyclical nature of the *Time* feature. This is necessary to ensure models understand that, for example, 23:55 is closer to 00:05 than it is to 12:00. To achieve this time is represented by a pair of coordinates in a circle, where the x-axis is the sin of Time and the y-axis is the cosine of *Time*. This chart shows the distribution of casualties by time of day, note that the lighter shade in the chart indicates fewer observations which is consistent with the earlier chart:
+
+```{r cyclical variables, echo = FALSE, out.width = '50%', fig.align = 'center', fig.cap = 'Cyclical distribution of casualties by hour in the day'}
+# Encoding time as cyclical variables
+train_set <- train_set %>% mutate(Time_sin = sin((Time/(24*60*60)) * pi * 2), 
+                                  Time_cos = cos((Time/(24*60*60)) * pi * 2),
+                                  Dow_sin = sin(((wday(Date)-1) / 7) * pi * 2), 
+                                  Dow_cos = cos(((wday(Date)-1) / 7) * pi * 2))
+
+train_set %>% ggplot(aes(Time_sin, Time_cos)) + 
+geom_point(alpha = 0.002, fill = chart_col_1, colour = chart_col_1, size = 1) + 
+   annotate(geom = "Text", x = sin(0 * pi * 2), y = cos(0 * pi * 2) - 0.1, label = "0") +
+   annotate(geom = "Text", x = sin(0.25 * pi * 2) - 0.1, y = cos(0.25 * pi * 2) , label = "6") +
+   annotate(geom = "Text", x = sin(0.5 * pi * 2), y = cos(0.5 * pi * 2) + 0.1, label = "12") +
+   annotate(geom = "Text", x = sin(0.75 * pi * 2) + 0.1, y = cos(0.75 * pi * 2), label = "18") +
+   theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.3, 
+   linetype = "solid"), axis.text = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5)),  axis.title.y = element_text(size = rel(1.5)))
+ 
+```
+
+A new feature *day of week* has also been added, as this could capture different driver behaviours or impairment (e.g. alcohol). This too is a cyclical variable and has been encoded in the same manner as *Time*:
+
+```{r day of week as a cyclical variable, echo = FALSE, out.width = '50%', fig.align = 'center', fig.cap = 'Day of week as a cyclical variable'}
+# Encoding day of week as cyclical variables
+train_set %>% ggplot(aes(Dow_sin, Dow_cos)) + 
+   geom_point(alpha = 0.005, fill = chart_col_1, colour = chart_col_1, size = 5) + 
+   annotate(geom = "Text", x = sin(0 * pi * 2), y = cos(0 * pi * 2) - 0.1, label = "Sun") +
+   annotate(geom = "Text", x = sin(1/7 * pi * 2), y = cos(1/7 * pi * 2) - 0.1, label = "Mon") +
+   annotate(geom = "Text", x = sin(2/7 * pi * 2), y = cos(2/7 * pi * 2) - 0.1, label = "Tue") +
+   annotate(geom = "Text", x = sin(3/7 * pi * 2), y = cos(3/7 * pi * 2) - 0.1, label = "Wed") +
+   annotate(geom = "Text", x = sin(4/7 * pi * 2), y = cos(4/7 * pi * 2) - 0.1, label = "Thu") +
+   annotate(geom = "Text", x = sin(5/7 * pi * 2), y = cos(5/7 * pi * 2) - 0.1, label = "Fri") +
+   annotate(geom = "Text", x = sin(6/7 * pi * 2), y = cos(6/7 * pi * 2) - 0.1, label = "Sat") +
+   theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.3, 
+                                         linetype = "solid"), axis.text = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5)), axis.title.y = element_text(size = rel(1.5)))
+```
+
+The penultimate step of data preparation is to apply one hot encoding for the categorical features. These features are provided as numerical values, but they do not have any logical order to them. Supplying figures like this to machine learning algorithms would likely result in very poor models as the algorithm would assume such a relationship exists between the figures.
+
+Categorical features with a small number possible values are encoded by directly creating new columns.
+
+For categorical features with a large number of values, the caret package has been used create dummy variables and then fill out values of one or zero as appropriate. The option *fullrank* is always set to true to avoid perfect multicollinearity between features. As a simple example, if we have a feature that can only take values of A, B or C, then dummy variables only need to be created for A and B. If they are both zero for an observation, then by definition we know that the value was originally C. Including a dummy variable for C as well would introduce perfect multicollinearity between these variables.
+
+```{r encode categorical variables, include = FALSE}
+
+# Change road class to combine motorways with A(M) roads as they are equivalent
+train_set$Road_Class <- ifelse(train_set$Road_Class == 1, 1, train_set$Road_Class - 1)
+
+# Encode light conditions
+train_set$Daylight <- ifelse(train_set$Light_Conditions == 1, 1,0)
+train_set$Street_Light <- ifelse(train_set$Light_Conditions == 4, 1, 0)
+
+# Encode weather conditions
+train_set$Raining <- ifelse(train_set$Weather_Conditions %in% c(2,5), 1,0)
+train_set$Snowing <- ifelse(train_set$Weather_Conditions %in% c(3,6), 1, 0)
+train_set$Foggy <- ifelse(train_set$Weather_Conditions == 7, 1, 0)
+train_set$Windy <- ifelse(train_set$Weather_Conditions %in% c(4,5,6), 1, 0)
+
+# Encode road type 
+train_set$Road_Type <- as.factor(case_when(train_set$Road_Type == 1 ~ "aa_Roundabout",
+                                           train_set$Road_Type == 2 ~ "One_way",
+                                           train_set$Road_Type == 3 ~ "Dual_c",
+                                           train_set$Road_Type == 6 ~ "Single_c",
+                                           train_set$Road_Type == 7 ~ "Slip"))
+  
+dmy <- dummyVars("~Road_Type",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode road conditions 
+train_set$Road_Surface_Conditions <- as.factor(case_when(
+                    train_set$Road_Surface_Conditions == 1 ~ "Road_Dry",
+                    train_set$Road_Surface_Conditions == 2 ~ "Road_Wet",
+                    train_set$Road_Surface_Conditions == 3 ~ "Road_Snowy",
+                    train_set$Road_Surface_Conditions == 4 ~ "Road_Icey",
+                    train_set$Road_Surface_Conditions == 5 ~ "Road_Flooded"))
+
+dmy <- dummyVars("~Road_Surface_Conditions",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode junction detail
+train_set$Junction_Detail <- as.factor(case_when(
+                    train_set$Junction_Detail == 0 ~ "aa_No_junc",
+                    train_set$Junction_Detail == 1 ~ "Junc_Roundabout",
+                    train_set$Junction_Detail == 2 ~ "Junc_Mini_roundabout",
+                    train_set$Junction_Detail == 3 ~ "Junc_T",
+                    train_set$Junction_Detail == 5 ~ "Junc_Slip",
+                    train_set$Junction_Detail == 6 ~ "Junc_Crossroads",
+                    train_set$Junction_Detail == 7 ~ "Junc_More_than_4",
+                    train_set$Junction_Detail == 8 ~ "Junc_Private_drive",
+                    train_set$Junction_Detail == 9 ~ "Junc_Other"))
+
+dmy <- dummyVars("~Junction_Detail",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode vehicle type
+train_set$Vehicle_Type <- as.factor(case_when(
+                    train_set$Vehicle_Type == 1 ~ "aa_pedal_bike",
+                    train_set$Vehicle_Type %in% c(2,3,4,5) ~ "Motorbike",
+                    train_set$Vehicle_Type %in% c(8,9) ~ "Car",
+                    train_set$Vehicle_Type == 19 ~ "LGV",
+                    train_set$Vehicle_Type %in% c(20,21) ~ "HGV"))
+
+dmy <- dummyVars("~Vehicle_Type",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+train_set$Vehicle_Type_B <- as.factor(case_when(
+                    train_set$Vehicle_Type_B == 1 ~ "aa_pedal_bike_B",
+                    train_set$Vehicle_Type_B %in% c(2,3,4,5) ~ "Motorbike_B",
+                    train_set$Vehicle_Type_B %in% c(8,9) ~ "Car_B",
+                    train_set$Vehicle_Type_B == 19 ~ "LGV_B",
+                    train_set$Vehicle_Type_B %in% c(20,21) ~ "HGV_B"))
+
+dmy <- dummyVars("~Vehicle_Type_B",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode vehicle manoeuvre
+train_set$Vehicle_Manoeuvre <- as.factor(case_when(
+                    train_set$Vehicle_Manoeuvre == 1 ~ "Reversing",
+                    train_set$Vehicle_Manoeuvre == 2 ~ "Parked",
+                    train_set$Vehicle_Manoeuvre == 3 ~ "Held_up",
+                    train_set$Vehicle_Manoeuvre == 4 ~ "Stopping",
+                    train_set$Vehicle_Manoeuvre == 5 ~ "Moving_off",
+                    train_set$Vehicle_Manoeuvre == 6 ~ "U_turn",
+                    train_set$Vehicle_Manoeuvre == 7 ~ "Left_turn",
+                    train_set$Vehicle_Manoeuvre == 8 ~ "Wait_turn_left",
+                    train_set$Vehicle_Manoeuvre == 9 ~ "Right_turn",
+                    train_set$Vehicle_Manoeuvre == 10 ~ "Wait_turn_right",
+                    train_set$Vehicle_Manoeuvre == 11 ~ "Change_lane_left",
+                    train_set$Vehicle_Manoeuvre == 12 ~ "Change_lane_right",
+                    train_set$Vehicle_Manoeuvre == 13 ~ "Overtake_moving",
+                    train_set$Vehicle_Manoeuvre == 14 ~ "Overtake_static",
+                    train_set$Vehicle_Manoeuvre == 15 ~ "Overtake_nearside",
+                    train_set$Vehicle_Manoeuvre == 16 ~ "Left_bend",
+                    train_set$Vehicle_Manoeuvre == 17 ~ "Right_bend",
+                    train_set$Vehicle_Manoeuvre == 18 ~ "aa_Ahead_other"))
+
+dmy <- dummyVars("~Vehicle_Manoeuvre",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+train_set$Vehicle_Manoeuvre_B <- as.factor(case_when(
+                    train_set$Vehicle_Manoeuvre_B == 1 ~ "Reversing_B",
+                    train_set$Vehicle_Manoeuvre_B == 2 ~ "Parked_B",
+                    train_set$Vehicle_Manoeuvre_B == 3 ~ "Held_up_B",
+                    train_set$Vehicle_Manoeuvre_B == 4 ~ "Stopping_B",
+                    train_set$Vehicle_Manoeuvre_B == 5 ~ "Moving_off_B",
+                    train_set$Vehicle_Manoeuvre_B == 6 ~ "U_turn_B",
+                    train_set$Vehicle_Manoeuvre_B == 7 ~ "Left_turn_B",
+                    train_set$Vehicle_Manoeuvre_B == 8 ~ "Wait_turn_left_B",
+                    train_set$Vehicle_Manoeuvre_B == 9 ~ "Right_turn_B",
+                    train_set$Vehicle_Manoeuvre_B == 10 ~ "Wait_turn_right_B",
+                    train_set$Vehicle_Manoeuvre_B == 11 ~ "Change_lane_left_B",
+                    train_set$Vehicle_Manoeuvre_B == 12 ~ "Change_lane_right_B",
+                    train_set$Vehicle_Manoeuvre_B == 13 ~ "Overtake_moving_B",
+                    train_set$Vehicle_Manoeuvre_B == 14 ~ "Overtake_static_B",
+                    train_set$Vehicle_Manoeuvre_B == 15 ~ "Overtake_nearside_B",
+                    train_set$Vehicle_Manoeuvre_B == 16 ~ "Left_bend_B",
+                    train_set$Vehicle_Manoeuvre_B == 17 ~ "Right_bend_B",
+                    train_set$Vehicle_Manoeuvre_B == 18 ~ "aa_Ahead_other_B"))
+
+dmy <- dummyVars("~Vehicle_Manoeuvre_B",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode skidding and overturning
+
+train_set$Skidded <- ifelse(train_set$Skidding_and_Overturning %in% c(1,2), 1, 0)
+train_set$Skidded_B <- ifelse(train_set$Skidding_and_Overturning_B %in% c(1,2), 1, 0)
+                      
+train_set$Overturned <- ifelse(train_set$Skidding_and_Overturning %in% c(2,4,5), 1, 0)
+train_set$Overturned_B <- ifelse(train_set$Skidding_and_Overturning_B %in% c(2,4,5), 1, 0)
+
+train_set$Jacknifed <- ifelse(train_set$Skidding_and_Overturning %in% c(3,4), 1, 0)
+train_set$Jacknifed_B <- ifelse(train_set$Skidding_and_Overturning_B %in% c(3,4), 1, 0)
+
+# Encode leaving carriageway
+
+train_set$Straight <- ifelse(train_set$Vehicle_Leaving_Carriageway %in% c(3), 1, 0)
+train_set$Straight_B <- ifelse(train_set$Vehicle_Leaving_Carriageway_B %in% c(3), 1, 0)
+
+train_set$Offside <- ifelse(train_set$Vehicle_Leaving_Carriageway %in% c(4,5,6,7,8), 1, 0)
+train_set$Offside_B <- ifelse(train_set$Vehicle_Leaving_Carriageway_B %in% c(4,5,6,7,8), 1, 0)
+
+train_set$Nearside <- ifelse(train_set$Vehicle_Leaving_Carriageway %in% c(1,2), 1, 0)
+train_set$Nearside_B <- ifelse(train_set$Vehicle_Leaving_Carriageway_B %in% c(1,2), 1, 0)
+
+train_set$Rebound <- ifelse(train_set$Vehicle_Leaving_Carriageway %in% c(2,5,8), 1, 0)
+train_set$Rebound_B <- ifelse(train_set$Vehicle_Leaving_Carriageway_B %in% c(2,5,8), 1,0)
+
+train_set$Central_res <- ifelse(train_set$Vehicle_Leaving_Carriageway %in% c(4,5), 1, 0)
+train_set$Central_res_B <- ifelse(train_set$Vehicle_Leaving_Carriageway_B %in% c(4,5), 1, 0)
+
+train_set$Over_central <- ifelse(train_set$Vehicle_Leaving_Carriageway %in% c(6), 1, 0)
+train_set$Over_central_B <- ifelse(train_set$Vehicle_Leaving_Carriageway_B %in% c(6), 1, 0)
+
+# Encode hit object
+
+train_set$Hit_object <- ifelse(train_set$Hit_Object_off_Carriageway == 0 , 0, 1)
+train_set$Hit_object_B <- ifelse(train_set$Hit_Object_off_Carriageway_B == 0, 0, 1)
+
+# Encode point of impact
+
+train_set$First_Point_of_Impact <- as.factor(case_when(
+                      train_set$First_Point_of_Impact == 0 ~ "aa_no_impact",
+                      train_set$First_Point_of_Impact == 1 ~ "Impact_Front",
+                      train_set$First_Point_of_Impact == 2 ~ "Impact_Back",
+                      train_set$First_Point_of_Impact == 3 ~ "Impact_Offside",
+                      train_set$First_Point_of_Impact == 4 ~ "Impact_Nearside"))
+
+dmy <- dummyVars("~First_Point_of_Impact",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+train_set$First_Point_of_Impact_B <- as.factor(case_when(
+                      train_set$First_Point_of_Impact_B == 0 ~ "aa_no_impact_B",
+                      train_set$First_Point_of_Impact_B == 1 ~ "Impact_Front_B",
+                      train_set$First_Point_of_Impact_B == 2 ~ "Impact_Back_B",
+                      train_set$First_Point_of_Impact_B == 3 ~ "Impact_Offside_B",
+                      train_set$First_Point_of_Impact_B == 4 ~ "Impact_Nearside_B"))
+
+dmy <- dummyVars("~First_Point_of_Impact_B",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode sex of driver
+
+train_set$Sex_of_Driver <- as.factor(ifelse(train_set$Sex_of_Driver == 1, "Male_driver",
+                                    ifelse(train_set$Sex_of_Driver == 2, "Female_driver",NA)))
+
+dmy <- dummyVars("~Sex_of_Driver",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+train_set$Sex_of_Driver_B <- as.factor(ifelse(train_set$Sex_of_Driver_B == 1, "Male_driver_B",
+                                      ifelse(train_set$Sex_of_Driver_B == 2, "Female_driver_B",NA)))
+
+dmy <- dummyVars("~Sex_of_Driver_B",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode combined casualty class and car passenger fields
+
+train_set$Casualty_Location <- as.factor(
+                   ifelse(train_set$Casualty_Class == 1, "Driver",
+                   ifelse(train_set$Casualty_Class == 3, "aa_Pedestrian",
+                   ifelse(train_set$Car_Passenger == 1, "Front_Passenger","Rear_Passenger"))))
+
+dmy <- dummyVars("~Casualty_Location",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+# Encode sex of casualty
+train_set$Sex_of_Casualty <- as.factor(ifelse(train_set$Sex_of_Casualty == 1, "Male_cas",
+                                       ifelse(train_set$Sex_of_Casualty == 2, "Female_cas",NA)))
+
+dmy <- dummyVars("~Sex_of_Casualty",data=train_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=train_set))
+train_set <- bind_cols(train_set, trfs)
+
+### Change casualty severity to a factor
+train_set$Casualty_Severity <- as.factor(train_set$Casualty_Severity)
+
+# Remove original columns where we now have one hot encoding
+train_set <- train_set %>% select(Age_of_Casualty, Casualty_Severity, Age_of_Driver, Age_of_Driver_B,
+                                  Road_Class, Speed_limit, Time_sin:Male_driver_B, Driver:Male_cas)
+```
+
+The addition of the dummy variables increases the number of columns significantly to `r ncol(train_set)`.
+
+The final step is to split out 10% of observations from the training set to use as a validation set . The training set will be used to train and build models, these can then be tested against the validation set to allow a decision to be made about the final model to be used. Only then will the test set be used against the final model selected to provide the final assessment of the chosen model.
+
+```{r split out a validation set, include = FALSE}
+# Split out validation set from training set
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = train_set$Casualty_Severity, times = 1, p = 0.1, list = FALSE)
+validate_set <- train_set[test_index,]
+train_set <- train_set[-test_index,]
+
+```
+
+\pagebreak
+
+# 5. Model selection
+
+## i. Basic model - prior probabilities
+
+A good starting point for the assessment of competing models is a basic model that guesses whether a casualty received serious injuries or not. This will provide a good baseline against which more complex models should be able to achieve more impressive results.
+
+Predictions are made for the validation set using the prevalence observed in the training set as the probabilities for the sample function. These predictions are then compared to the actual casualty severity and the results shown in a confusion matrix:
+
+```{r basic model - prior probabilities, include = FALSE}
+# run basic model
+prob_slight <- sum(train_set$Casualty_Severity == 1) / nrow(train_set)
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+guess_class <- data.frame(Casualty_Severity = as.factor(
+    sample(c(0,1), size = nrow(validate_set), replace = TRUE, prob = c(1- prob_slight, prob_slight))))
+cm <- confusionMatrix(data = guess_class$Casualty_Severity, reference = validate_set$Casualty_Severity, positive = "1")
+```
+
+```{r prior probability CM, echo = FALSE}
+# CM for basic model
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+```
+
+We can see that the model is good at predicting when a casualty is not seriously injured, but fails to correctly predict those that are injured seriously. The following table shows the key results that will be used to compare all the models in the analysis, the metrics are the following:
+
+-   Overall: The proportion of predictions that are correct
+
+-   Sensitivity: The proportion of serious casualties that are correctly predicted as such
+
+-   Specificity: The proportion of minor injuries that are correctly predicted as such
+
+-   Balanced: The mean average of the sensitivity and specificity metrics
+
+-   Pos_pred: The positive predictive value or precision, which is the proportion of predictions for serious injuries that were serious casualties in reality
+
+```{r prior probability results, echo = FALSE}
+# summary results for basic model
+results <- data.frame(Method = "Basic guess", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3])
+row.names(results) <- NULL
+results %>% KableTidy
+```
+
+As might be expected with guessing, the results are not very impressive. Whilst the specificity is strong at `r cm$byClass[2]*100`%, the ability of this simple approach to correctly predict the serious casualties is very low at just `r cm$byClass[1]*100`% (the sensitivity measure). It therefore achieves a poor balanced accuracy score and a precision value of `r cm$byClass[3]*100`% that will not be of practical use.
+
+## ii. Random Forest
+
+The first true machine learning algorithm used in this analysis is the random forest, it has been selected as one of its outputs is the relative importance of each feature. This can then be used for feature selection, i.e. using a smaller number of features with the best predictive power.
+
+When the random forest is initially run, we find that prevalence is causing a significant issue, the model predicts a very small number of serious casualties:
+
+```{r Initial random forest, include = FALSE}
+# run initial random forest
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+rf_fit <- randomForest(Casualty_Severity ~ ., data = train_set, ntree = 50)
+rf_class <- predict(rf_fit, validate_set, type = "class")
+cm <- confusionMatrix(data = rf_class, reference = validate_set$Casualty_Severity, positive = "1")
+
+max(predict(rf_fit, validate_set, type = "prob")[,2])
+```
+
+```{r initial random forest confusion matrix, echo = FALSE}
+# CM for initial random forest
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+```
+
+\pagebreak
+
+This allows the model to achieve a high level of overall accuracy because the specificity is so high. The sensitivity is extremely low however as the model fails to predict injuries that were serious in reality. It is interesting to note that the precision is high in this case, but the overall number of positive predictions is so small that the result is actually very poor. This highlights the benefit of considering several metrics when rating model outcomes.
+
+```{r Initial random forest results, echo = FALSE}
+# summary results for initial random forest
+results_temp <- data.frame(Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]) 
+
+row.names(results_temp) <- NULL
+results_temp %>% KableTidy()
+```
+
+To address the issue of prevalence, the training set is adjusted to be balanced. To achieve this, the number of observations for casualties with non serious injuries is reduced to the number of serious casualties, by taking a random sample. Running the random forest again we can see that the accuracy has improved significantly. There is a strong improvement in the balanced accuracy score, and the precision is considerably better than the simple guess used previously.
+
+```{r Random forest with balanced data, include = FALSE}
+### Create a balanced dataset
+imbal <- sum(train_set$Casualty_Severity == 1) / sum(train_set$Casualty_Severity == 0)
+train_sev_0 <- train_set %>% filter(Casualty_Severity == 0)
+train_sev_1 <- train_set %>% filter(Casualty_Severity == 1)
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+index <- createDataPartition(y = train_sev_0$Casualty_Severity, times = 1, p = imbal, list = FALSE)
+train_sev_0 <- train_sev_0[index,]
+train_set <- bind_rows(train_sev_0, train_sev_1)
+
+### Run random forest with balanced training data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+rf_fit <- randomForest(Casualty_Severity ~ ., data = train_set)
+rf_class <- predict(rf_fit, validate_set, type = "class")
+cm <- confusionMatrix(data = rf_class, reference = validate_set$Casualty_Severity, positive = "1")
+```
+
+```{r Random forest with balanced data results, echo = FALSE}
+# CM and summary results for random forest with balanced dataset
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results_temp <- data.frame(Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]) 
+
+row.names(results_temp) <- NULL
+results_temp %>% KableTidy()
+```
+
+It may be possible to further improve this model however, by tuning the *mtry* parameter, which defines the number of features that are randomly selected to be used each time a tree is split. The default value is the square root of the number of features (rounded down), which in this case is ten. The *train* function from the the *caret* package has been used to test a range of *mtry* values within 5 above and below the default value using cross validation. Five fold cross validation with 90% of the records is used for all parameter tuning.
+
+```{r Tuning random forest, include = FALSE}
+# Tune the mtry parameter
+control <- trainControl(method = "cv", number = 5, p = .9) ## This will be used for all cross validation
+tunegrid <- expand.grid(.mtry=c(5:15) )
+set.seed(1, sample.kind="Rounding")
+rf_fit <- train(Casualty_Severity ~ ., data=train_set, method="rf", 
+                       metric="Accuracy", tuneGrid=tunegrid, trControl=control ,ntree=50)
+rf_class <- predict(rf_fit, validate_set, type = "raw")
+cm <- confusionMatrix(data = rf_class, reference = validate_set$Casualty_Severity, positive = "1")
+```
+
+The optimal value of *mtry* is found to be `r rf_fit$bestTune$mtry` and the model using this value marginally improves accuracy over the default model:
+
+```{r tuned random forest results, echo = FALSE}
+# CM and summary results for tuned random forest (all features)
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results_temp <- data.frame(Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]) 
+
+row.names(results_temp) <- NULL
+results_temp %>% KableTidy()
+```
+
+\pagebreak
+
+A useful output of the random forest model is the relative importance of each feature when the model was built. This can be used to reduce the features in the dataset to a smaller number of the most useful variables, which has the twin advantages of improving computational speed and, more importantly, reducing the likelihood of overfitting models to the training data.
+
+```{r identify key variables, include = FALSE}
+# Identify all variables that are at least 10% of the importance of the most important feature
+key_vars <- row.names(as.data.frame(rf_fit$finalModel$importance[rf_fit$finalModel$importance > max(rf_fit$finalModel$importance) * 0.1,]))
+```
+
+Any feature with an importance of less than 10% of the most important feature are removed from the dataset at this stage. We now have `r length(key_vars)` features:
+
+```{r list key variables, echo = FALSE}
+# Show these variables
+data.frame(Importance = 1:length(key_vars), Feature = key_vars)  %>% KableTidy   
+```
+
+The reduced set of features generally includes some information from each of the original categorical variables, before they were replaced with dummy variables for one hot encoding. Therefore the reduction of features has retained only the most important values from the categorical variables, rather than excluding any in totality. For example there are eight variables representing the type of junction, but only two are found to be among the most useful features.
+
+The ten most important features (actually the top 12 as time and date appear twice) are:
+
+-   Age of the casualty
+
+-   Age of each driver
+
+-   Type of road and speed limit
+
+-   Time of day and day of week
+
+-   Light conditions and presence of rain
+
+```{r apply key feature selection, include = FALSE}
+# Remove features from training and validation set that are not on that list
+train_set <- train_set %>% select("Casualty_Severity", key_vars)
+validate_set <- validate_set %>% select("Casualty_Severity", key_vars)
+```
+
+The random forest algorithm is now trained again with the reduced set of features and continues to perform far better than just guessing:
+
+```{r final random forest, include = FALSE}
+# Tune random forest again, now with smaller set of features
+tunegrid <- expand.grid(.mtry=c(5:15) )
+set.seed(1, sample.kind="Rounding")
+rf_fit <- train(Casualty_Severity ~ ., data=train_set, method="rf", 
+                       metric="Accuracy", tuneGrid=tunegrid, trControl=control ,ntree=50)
+rf_class <- predict(rf_fit, validate_set, type = "raw")
+cm <- confusionMatrix(data = rf_class, reference = validate_set$Casualty_Severity, positive = "1")
+
+class_pred <- data.frame(rf = ifelse(rf_class == 0, 0, 1))
+```
+
+```{r Final random forest results, echo = FALSE}
+# CM and summary results for the final random forest
+results <- rbind(results, data.frame(Method = "Random Forest", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+row.names(results) <- NULL
+
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results %>% KableTidy
+```
+
+It is worth highlighting at this point just how accurate the model will need to be to overcome the issue of prevalence and provide useful predictions. The balanced accuracy measure of `r cm$byClass[11]*100`% is a good result, but the precision is only `r cm$byClass[3]*100`%, which is not going to be very useful. If a model achieved 90% scores for both sensitivity and specificity when the prevalence is 10%, then the precision would be exactly 50%. This is because the true positives would be 9% of the observations (90% of the 10%) and the false negatives would also be 9% (10% of the 90%) and hence the prediction is right half of the time.
+
+## iii. K Nearest Neighbour (KNN)
+
+The k nearest neighbour (KNN) is another popular algorithm for classification problems, let's see if it can beat the tree based model. Because knn is a distance based algorithm, the scale of features is very important because features that have a larger range of values will separate observations with a greater distance than features with a small range of values. In this analysis there are numerous binary variables, but also several that have much higher values, including the speed limit and the ages of drivers and casualties. Failing to adjust for this issue will generate very poor results:
+
+```{r Initial KNN, include = FALSE}
+# Run initial KNN, no scaling
+knn_fit <- knn3(Casualty_Severity ~ ., data = train_set)
+knn_class <- predict(knn_fit, validate_set, type = "class")
+cm <- confusionMatrix(data = knn_class, reference = validate_set$Casualty_Severity, positive = "1")
+```
+
+```{r initial KNN results, echo = FALSE}
+# CM and summary results for initial KNN
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results_temp <- data.frame(Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]) 
+
+row.names(results_temp) <- NULL
+results_temp %>% KableTidy()
+```
+
+Once the data has been scaled the knn algorithm can be trained to identify the optimal number of neighbours for the model. The best knn model now produces much better results than the initial knn model, however it is inferior to the random forest model. Although the balanced accuracy is very similar, it has a much weaker specificity which means a lot of false positives, which then overwhelm the true positives and result in a poor precision.
+
+```{r scale data, include = FALSE}
+# only scale the features, not the target variable
+train_scale <- as.data.frame(scale(train_set[,2:ncol(train_set)]))
+train_scale <- data.frame(Casualty_Severity = train_set$Casualty_Severity, train_scale)
+validate_scale <- scale(validate_set[,2:ncol(train_set)])
+validate_scale <- data.frame(Casualty_Severity = validate_set$Casualty_Severity, validate_scale)
+```
+
+```{r final KNN, include = FALSE}
+# Tune the KNN model, now with scaled data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+tunegrid <-  data.frame(k = seq(10,100,10))
+knn_fit <- train(Casualty_Severity ~ ., data = train_scale, method = "knn",
+                   trControl = control, tuneGrid = tunegrid)
+
+knn_class <- predict(knn_fit, validate_scale, type = "raw")
+
+cm <- confusionMatrix(data = knn_class, reference = validate_scale$Casualty_Severity, positive = "1")
+class_pred <- data.frame(class_pred, knn = ifelse(knn_class == 0, 0, 1))
+```
+
+```{r final KNN results, echo = FALSE}
+# CM and summary results for final KNN model
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results <- rbind(results, data.frame(Method = "KNN", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+row.names(results) <- NULL
+
+results %>%  KableTidy
+```
+
+## iv. Logistic regression
+
+The next model used in this analysis is logistic regression, which is well suited to binary classification problems. There are no parameters to tune, so the model can be run without the need to use the train function. The model performs relatively strongly, it has slightly stronger balanced accuracy than the random forest, although its precision is marginally lower:
+
+```{r logistic regression, include = FALSE}
+# Run logistic regression model
+log_fit <- glm(Casualty_Severity ~ ., data = train_set, family = "binomial")
+log_prob <- predict(log_fit, newdata = validate_set, type = "response")
+log_class <- as.factor(ifelse(log_prob > 0.5, 1, 0))
+cm <- confusionMatrix(data = log_class, reference = validate_set$Casualty_Severity, positive = "1")
+class_pred <- data.frame(class_pred, log = ifelse(log_class == 0, 0, 1))
+```
+
+```{r logistic regression results, echo = FALSE}
+# CM and summary results for logistic regression model
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results <- rbind(results, data.frame(Method = "Logistic regression", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+row.names(results) <- NULL
+
+results %>% KableTidy
+```
+
+## v. Linear discriminant analysis (LDA)
+
+Next to be tested is a Bayesian classifier, linear discriminant analysis or LDA. Again, this algorithm does not require the use of the train function to tune any parameters. The results are marginally weaker than the logistic regression model, due to a slight decline in precision.
+
+```{r LDA, include = FALSE}
+# Run LDA model
+lda_fit <- train(Casualty_Severity ~ ., method = "lda", data = train_set)
+lda_class <- predict(lda_fit, validate_set, type = "raw")
+cm <- confusionMatrix(data = lda_class, reference = validate_set$Casualty_Severity, positive = "1")
+class_pred <- data.frame(class_pred, lda = ifelse(lda_class == 0, 0, 1))
+```
+
+```{r LDA results, echo = FALSE}
+# CM and summary results for LDA model
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results <- rbind(results, data.frame(Method = "LDA", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+row.names(results) <- NULL
+
+results %>% KableTidy
+```
+
+## vi. Support Vector Machine
+
+This final individual model in this analysis is the support vector machine (SVM). The first step is to decide whether to run the model for a linear solution, or use one of the available kernels that allow for non-linear decision boundary. The table below shows the results when different kernels are used with their default parameters. It shows that the radial kernel performs significantly better than the others both in terms of the balanced accuracy score and precision.
+
+```{r Support vector machine - pick kernel, echo = FALSE}
+# Run SVM model with each kernel type, default parameter settings
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+train_set_slim <- train_set[createDataPartition(y = train_set$Casualty_Severity, times = 1, p = 0.1, list = FALSE),]
+
+svm_fit <- svm(Casualty_Severity ~ ., data = train_set_slim, kernel="linear")
+svm_class <- predict(svm_fit, validate_set, type = "raw")
+cm <- confusionMatrix(data = svm_class, reference = validate_set$Casualty_Severity, positive = "1")
+
+svm_results <- data.frame(Method = "Linear", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2], Balanced = cm$byClass[11], Pos_pred = cm$byClass[3])
+
+svm_fit <- svm(Casualty_Severity ~ ., data = train_set_slim, kernel="radial")
+svm_class <- predict(svm_fit, validate_set, type = "raw")
+cm <- confusionMatrix(data = svm_class, reference = validate_set$Casualty_Severity, positive = "1")
+svm_results <- rbind(svm_results, data.frame(Method = "Radial", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2], Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+
+svm_fit <- svm(Casualty_Severity ~ ., data = train_set_slim, kernel="polynomial")
+svm_class <- predict(svm_fit, validate_set, type = "raw")
+cm <- confusionMatrix(data = svm_class, reference = validate_set$Casualty_Severity, positive = "1")
+svm_results <- rbind(svm_results, data.frame(Method = "Polynomial", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2], Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+
+svm_fit <- svm(Casualty_Severity ~ ., data = train_set_slim, kernel="sigmoid")
+svm_class <- predict(svm_fit, validate_set, type = "raw")
+cm <- confusionMatrix(data = svm_class, reference = validate_set$Casualty_Severity, positive = "1")
+svm_results <- rbind(svm_results, data.frame(Method = "Sigmoid", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2], Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+
+row.names(svm_results) <- NULL
+svm_results %>% KableTidy
+```
+
+```{r Support vector machine, include = FALSE}
+# Tune the SVM model, now we have chosen the kernel
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+tunegrid <- expand.grid(C = seq(0.25, 1.5, 0.25), sigma = seq(0.005, 0.05, 0.005))
+svm_fit <- train(Casualty_Severity ~ ., data = train_set_slim, method = "svmRadial", preProcess = c("center","scale"), trControl = control,   tuneGrid = tunegrid)
+          
+svm_class <- predict(svm_fit, validate_set, type = "raw")
+
+cm <- confusionMatrix(data = svm_class, reference = validate_set$Casualty_Severity, positive = "1")
+class_pred <- data.frame(class_pred, svm = ifelse(svm_class == 0, 0, 1))
+```
+
+The radial kernel is therefore chosen for the SVM model, which can now be tuned to find the optimal combination of values for the cost (which defines the penalty for a mis-classification) and gamma (which defines the shape of the decision boundary). This chart shows the accuracy for each combination within the ranges tested, with the optimal parameters being `r svm_fit$bestTune$sigma` for sigma and `r svm_fit$bestTune$C` for the cost:
+
+\pagebreak
+
+```{r SVM tuning chart, echo = FALSE, out.width = '50%', fig.align = 'center', fig.cap = 'Model accuracy with different model parameters'}
+# Chart parameter tuning against model accuracy
+plot(svm_fit)
+```
+
+The SVM model achieves a balanced accuracy and precision which rates it as the fourth best method in this analysis. It is stronger than the knn model, but falls short of the results from the other three methods:
+
+```{r SVM results, echo = FALSE}
+# CM and summary results for SVM
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results <- rbind(results, data.frame(Method = "SVM", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+row.names(results) <- NULL
+
+results %>% KableTidy
+```
+
+## vii. Ensembles
+
+The use of an ensemble can be a powerful approach as the results from the individual models can complement each other and produce a more stable model. Two different ensembles have been tested - the three strongest models (random forest, logistic regression and LDA) and then all five models (aside from the basic guess). A prediction is made based on the majority of "votes" for a positive or negative prediction from the individual models. So if for example the random forest and LDA both predict a serious casualty for an observation, then the three model ensemble would also predict a serious casualty.
+
+The three model ensemble achieves a strong balanced accuracy score, but its precision score is behind some of the individual models:
+
+```{r ensembles, include = FALSE}
+# Build the ensembles
+class_pred <- class_pred %>% mutate(ens_3 = as.factor(ifelse(rf + log + lda  >= 2, 1, 0)),
+                                    vote_count_3 = as.factor(rf + log + lda ),
+                                    ens_5 = as.factor(ifelse(rf + knn + log + lda + svm >= 3, 1, 0)),
+                                    vote_count_5 = as.factor(rf + knn + log + lda + svm ))
+cm <- confusionMatrix(data = class_pred$ens_3, reference = validate_set$Casualty_Severity, positive = "1")
+```
+
+\pagebreak
+
+```{r ensemble 3 results, echo = FALSE}
+# CM and summary results for 3 model ensemble
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results <- rbind(results, data.frame(Method = "Ensemble 3", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+
+row.names(results) <- NULL
+
+results %>% KableTidy
+```
+
+The five model ensemble is stronger than the three model version, achieving the highest balanced accuracy of any model, although again its precision score is lower than some of the individual models.
+
+```{r Ensemble 5 results, echo = FALSE}
+# CM and summary results for 5 model ensemble
+cm <- confusionMatrix(data = class_pred$ens_5, reference = validate_set$Casualty_Severity, positive = "1")
+
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results <- rbind(results, data.frame(Method = "Ensemble 5", Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+           Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]))
+
+row.names(results) <- NULL
+results %>% KableTidy
+```
+
+The following charts show the distribution of casualty severity split by the number of models that "voted" for a positive prediction and whether they were seriously injured in reality. It is clear that the precision improves as more models vote to predict a serious casualty, but the figure even when all five models believe it was a serious casualty is low.
+
+\pagebreak
+
+```{r ensemble 5 charts, echo = FALSE, fig.width = 7, fig.height=3, fig.align = 'center', fig.cap = 'Distribution of casualties by number of positive "votes" and actual severity'}
+# Charts showing validation set observations, split by number of models calling a serious injury and the true severity
+ens_class_count <- data.frame(pred = class_pred$vote_count_5, actual = validate_set$Casualty_Severity)
+
+chart1 <- ens_class_count %>% ggplot(aes(x = pred)) + geom_bar(aes(fill = actual), position = "fill") +
+  scale_fill_discrete(name = "Actual \nseverity") +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid")) +
+  labs(x = "Number of positive predictions", y = "Proportion of casualties")
+
+chart2 <- ens_class_count %>% ggplot(aes(x = pred)) + geom_bar(aes(fill = actual)) +
+  scale_fill_discrete(name = "Actual \nseverity") +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid")) +
+  labs(x = "Number of positive predictions", y = "Number of casualties")
+
+grid.arrange(chart1, chart2, ncol = 2)
+```
+
+## viii. Model selection
+
+The random forest was the best individual model and its precision outperformed even the ensemble models. However, the five model ensemble achieved the highest balanced accuracy and the use of an ensemble has the added advantage of being more robust and less prone to overfitting as it several models have to agree in order for a prediction to be made.
+
+Therefore the five model ensemble had been selected as the final model and will now be tested against the test_set.
+
+\pagebreak
+
+# 6. Final model results
+
+The same steps that were necessary for the training set are repeated for the test set - imputing missing figures, correcting drivers age when under 16 and one hot encoding for the categorical variables.
+
+Each of the models developed above are then used to make predictions for test set and a majority vote is used to decide a final prediction. The results are quite close to the scores achieved for the validation set, which shows that we avoided over or underfitting the model:
+
+```{r deal with missing test data, include = FALSE}
+
+# If driver age is below 16, then set to 16
+test_set$Age_of_Driver <- ifelse(test_set$Age_of_Driver < 16, 16, test_set$Age_of_Driver)
+test_set$Age_of_Driver_B <- ifelse(test_set$Age_of_Driver_B < 16, 16, test_set$Age_of_Driver_B)
+
+# Impute values where missing
+test_set$Time <- as.numeric(hms(test_set$Time)) # Convert time to numeric to allow imputation
+imp_init = mice(test_set, maxit=0) 
+imp_meth = imp_init$method
+imp_pred_matrix = imp_init$predictorMatrix
+
+imp_pred_matrix[, c("Accident_Index", "Vehicle_Reference", "Casualty_Reference")]=0
+set.seed(1)
+imputed = mice(test_set, method=imp_meth, predictorMatrix=imp_pred_matrix, m=5)
+test_set <- complete(imputed)
+```
+
+```{r encode categorical fields in test data, include = FALSE}
+# Encoding time and day of week as cyclical variables
+test_set <- test_set %>% mutate(Time_sin = sin((Time/(24*60*60)) * pi * 2), 
+                                  Time_cos = cos((Time/(24*60*60)) * pi * 2),
+                                  Dow_sin = sin(((wday(Date)-1) / 7) * pi * 2), 
+                                  Dow_cos = cos(((wday(Date)-1) / 7) * pi * 2))
+
+# Change road class to be 1 to 5
+test_set$Road_Class <- ifelse(test_set$Road_Class == 1, 1, test_set$Road_Class - 1)
+
+# Encode light conditions
+test_set$Daylight <- ifelse(test_set$Light_Conditions == 1, 1,0)
+test_set$Street_Light <- ifelse(test_set$Light_Conditions == 4, 1, 0)
+
+# Encode weather conditions
+test_set$Raining <- ifelse(test_set$Weather_Conditions %in% c(2,5), 1,0)
+test_set$Snowing <- ifelse(test_set$Weather_Conditions %in% c(3,6), 1, 0)
+test_set$Foggy <- ifelse(test_set$Weather_Conditions == 7, 1, 0)
+test_set$Windy <- ifelse(test_set$Weather_Conditions %in% c(4,5,6), 1, 0)
+
+# Encode road type 
+test_set$Road_Type <- as.factor(case_when(test_set$Road_Type == 1 ~ "aa_Roundabout",
+                                           test_set$Road_Type == 2 ~ "One_way",
+                                           test_set$Road_Type == 3 ~ "Dual_c",
+                                           test_set$Road_Type == 6 ~ "Single_c",
+                                           test_set$Road_Type == 7 ~ "Slip"))
+
+dmy <- dummyVars("~Road_Type",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode road conditions 
+test_set$Road_Surface_Conditions <- as.factor(case_when(
+                        test_set$Road_Surface_Conditions == 1 ~ "Road_Dry",
+                        test_set$Road_Surface_Conditions == 2 ~ "Road_Wet",
+                        test_set$Road_Surface_Conditions == 3 ~ "Road_Snowy",
+                        test_set$Road_Surface_Conditions == 4 ~ "Road_Icey",
+                        test_set$Road_Surface_Conditions == 5 ~ "Road_Flooded"))
+
+dmy <- dummyVars("~Road_Surface_Conditions",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode junction detail
+test_set$Junction_Detail <- as.factor(case_when(
+                        test_set$Junction_Detail == 0 ~ "aa_No_junc",
+                        test_set$Junction_Detail == 1 ~ "Junc_Roundabout",
+                        test_set$Junction_Detail == 2 ~ "Junc_Mini_roundabout",
+                        test_set$Junction_Detail == 3 ~ "Junc_T",
+                        test_set$Junction_Detail == 5 ~ "Junc_Slip",
+                        test_set$Junction_Detail == 6 ~ "Junc_Crossroads",
+                        test_set$Junction_Detail == 7 ~ "Junc_More_than_4",
+                        test_set$Junction_Detail == 8 ~ "Junc_Private_drive",
+                        test_set$Junction_Detail == 9 ~ "Junc_Other"))
+
+dmy <- dummyVars("~Junction_Detail",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode vehicle type
+test_set$Vehicle_Type <- as.factor(case_when(
+                        test_set$Vehicle_Type == 1 ~ "aa_pedal_bike",
+                        test_set$Vehicle_Type %in% c(2,3,4,5) ~ "Motorbike",
+                        test_set$Vehicle_Type %in% c(8,9) ~ "Car",
+                        test_set$Vehicle_Type == 19 ~ "LGV",
+                        test_set$Vehicle_Type %in% c(20,21) ~ "HGV"))
+
+dmy <- dummyVars("~Vehicle_Type",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+test_set$Vehicle_Type_B <- as.factor(case_when(
+                        test_set$Vehicle_Type_B == 1 ~ "aa_pedal_bike_B",
+                        test_set$Vehicle_Type_B %in% c(2,3,4,5) ~ "Motorbike_B",
+                        test_set$Vehicle_Type_B %in% c(8,9) ~ "Car_B",
+                        test_set$Vehicle_Type_B == 19 ~ "LGV_B",
+                        test_set$Vehicle_Type_B %in% c(20,21) ~ "HGV_B"))
+
+dmy <- dummyVars("~Vehicle_Type_B",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode vehicle manoeuvre
+test_set$Vehicle_Manoeuvre <- as.factor(case_when(
+                        test_set$Vehicle_Manoeuvre == 1 ~ "Reversing",
+                        test_set$Vehicle_Manoeuvre == 2 ~ "Parked",
+                        test_set$Vehicle_Manoeuvre == 3 ~ "Held_up",
+                        test_set$Vehicle_Manoeuvre == 4 ~ "Stopping",
+                        test_set$Vehicle_Manoeuvre == 5 ~ "Moving_off",
+                        test_set$Vehicle_Manoeuvre == 6 ~ "U_turn",
+                        test_set$Vehicle_Manoeuvre == 7 ~ "Left_turn",
+                        test_set$Vehicle_Manoeuvre == 8 ~ "Wait_turn_left",
+                        test_set$Vehicle_Manoeuvre == 9 ~ "Right_turn",
+                        test_set$Vehicle_Manoeuvre == 10 ~ "Wait_turn_right",
+                        test_set$Vehicle_Manoeuvre == 11 ~ "Change_lane_left",
+                        test_set$Vehicle_Manoeuvre == 12 ~ "Change_lane_right",
+                        test_set$Vehicle_Manoeuvre == 13 ~ "Overtake_moving",
+                        test_set$Vehicle_Manoeuvre == 14 ~ "Overtake_static",
+                        test_set$Vehicle_Manoeuvre == 15 ~ "Overtake_nearside",
+                        test_set$Vehicle_Manoeuvre == 16 ~ "Left_bend",
+                        test_set$Vehicle_Manoeuvre == 17 ~ "Right_bend",
+                        test_set$Vehicle_Manoeuvre == 18 ~ "aa_Ahead_other"))
+
+dmy <- dummyVars("~Vehicle_Manoeuvre",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+test_set$Vehicle_Manoeuvre_B <- as.factor(case_when(
+                        test_set$Vehicle_Manoeuvre_B == 1 ~ "Reversing_B",
+                        test_set$Vehicle_Manoeuvre_B == 2 ~ "Parked_B",
+                        test_set$Vehicle_Manoeuvre_B == 3 ~ "Held_up_B",
+                        test_set$Vehicle_Manoeuvre_B == 4 ~ "Stopping_B",
+                        test_set$Vehicle_Manoeuvre_B == 5 ~ "Moving_off_B",
+                        test_set$Vehicle_Manoeuvre_B == 6 ~ "U_turn_B",
+                        test_set$Vehicle_Manoeuvre_B == 7 ~ "Left_turn_B",
+                        test_set$Vehicle_Manoeuvre_B == 8 ~ "Wait_turn_left_B",
+                        test_set$Vehicle_Manoeuvre_B == 9 ~ "Right_turn_B",
+                        test_set$Vehicle_Manoeuvre_B == 10 ~ "Wait_turn_right_B",
+                        test_set$Vehicle_Manoeuvre_B == 11 ~ "Change_lane_left_B",
+                        test_set$Vehicle_Manoeuvre_B == 12 ~ "Change_lane_right_B",
+                        test_set$Vehicle_Manoeuvre_B == 13 ~ "Overtake_moving_B",
+                        test_set$Vehicle_Manoeuvre_B == 14 ~ "Overtake_static_B",
+                        test_set$Vehicle_Manoeuvre_B == 15 ~ "Overtake_nearside_B",
+                        test_set$Vehicle_Manoeuvre_B == 16 ~ "Left_bend_B",
+                        test_set$Vehicle_Manoeuvre_B == 17 ~ "Right_bend_B",
+                        test_set$Vehicle_Manoeuvre_B == 18 ~ "aa_Ahead_other_B"))
+
+dmy <- dummyVars("~Vehicle_Manoeuvre_B",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode skidding and overturning
+
+test_set$Skidded <- ifelse(test_set$Skidding_and_Overturning %in% c(1,2), 1, 0)
+test_set$Skidded_B <- ifelse(test_set$Skidding_and_Overturning_B %in% c(1,2), 1, 0)
+
+test_set$Overturned <- ifelse(test_set$Skidding_and_Overturning %in% c(2,4,5), 1, 0)
+test_set$Overturned_B <- ifelse(test_set$Skidding_and_Overturning_B %in% c(2,4,5), 1, 0)
+
+test_set$Jacknifed <- ifelse(test_set$Skidding_and_Overturning %in% c(3,4), 1, 0)
+test_set$Jacknifed_B <- ifelse(test_set$Skidding_and_Overturning_B %in% c(3,4), 1, 0)
+
+# Encode leaving carriageway
+
+test_set$Straight <- ifelse(test_set$Vehicle_Leaving_Carriageway %in% c(3), 1, 0)
+test_set$Straight_B <- ifelse(test_set$Vehicle_Leaving_Carriageway_B %in% c(3), 1, 0)
+
+test_set$Offside <- ifelse(test_set$Vehicle_Leaving_Carriageway %in% c(4,5,6,7,8), 1, 0)
+test_set$Offside_B <- ifelse(test_set$Vehicle_Leaving_Carriageway_B %in% c(4,5,6,7,8), 1, 0)
+
+test_set$Nearside <- ifelse(test_set$Vehicle_Leaving_Carriageway %in% c(1,2), 1, 0)
+test_set$Nearside_B <- ifelse(test_set$Vehicle_Leaving_Carriageway_B %in% c(1,2), 1, 0)
+
+test_set$Rebound <- ifelse(test_set$Vehicle_Leaving_Carriageway %in% c(2,5,8), 1, 0)
+test_set$Rebound_B <- ifelse(test_set$Vehicle_Leaving_Carriageway_B %in% c(2,5,8), 1,0)
+
+test_set$Central_res <- ifelse(test_set$Vehicle_Leaving_Carriageway %in% c(4,5), 1, 0)
+test_set$Central_res_B <- ifelse(test_set$Vehicle_Leaving_Carriageway_B %in% c(4,5), 1, 0)
+
+test_set$Over_central <- ifelse(test_set$Vehicle_Leaving_Carriageway %in% c(6), 1, 0)
+test_set$Over_central_B <- ifelse(test_set$Vehicle_Leaving_Carriageway_B %in% c(6), 1, 0)
+
+# Encode hit object
+
+test_set$Hit_object <- ifelse(test_set$Hit_Object_off_Carriageway == 0 , 0, 1)
+test_set$Hit_object_B <- ifelse(test_set$Hit_Object_off_Carriageway_B == 0, 0, 1)
+
+# Encode point of impact
+
+test_set$First_Point_of_Impact <- as.factor(case_when(
+                      test_set$First_Point_of_Impact == 0 ~ "aa_no_impact",
+                      test_set$First_Point_of_Impact == 1 ~ "Impact_Front",
+                      test_set$First_Point_of_Impact == 2 ~ "Impact_Back",
+                      test_set$First_Point_of_Impact == 3 ~ "Impact_Offside",
+                      test_set$First_Point_of_Impact == 4 ~ "Impact_Nearside"))
+
+dmy <- dummyVars("~First_Point_of_Impact",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+test_set$First_Point_of_Impact_B <- as.factor(case_when(
+                      test_set$First_Point_of_Impact_B == 0 ~ "aa_no_impact_B",
+                      test_set$First_Point_of_Impact_B == 1 ~ "Impact_Front_B",
+                      test_set$First_Point_of_Impact_B == 2 ~ "Impact_Back_B",
+                      test_set$First_Point_of_Impact_B == 3 ~ "Impact_Offside_B",
+                      test_set$First_Point_of_Impact_B == 4 ~ "Impact_Nearside_B"))
+
+dmy <- dummyVars("~First_Point_of_Impact_B",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode sex of driver
+
+test_set$Sex_of_Driver <- as.factor(ifelse(test_set$Sex_of_Driver == 1, "Male_driver",
+                                            ifelse(test_set$Sex_of_Driver == 2, "Female_driver",NA)))
+
+dmy <- dummyVars("~Sex_of_Driver",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+test_set$Sex_of_Driver_B <- as.factor(ifelse(test_set$Sex_of_Driver_B == 1, "Male_driver_B",
+                                 ifelse(test_set$Sex_of_Driver_B == 2, "Female_driver_B",NA)))
+
+dmy <- dummyVars("~Sex_of_Driver_B",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode combined casualty class and car passenger fields
+
+test_set$Casualty_Location <- as.factor(
+                    ifelse(test_set$Casualty_Class == 1, "Driver",
+                    ifelse(test_set$Casualty_Class == 3, "aa_Pedestrian",
+                    ifelse(test_set$Car_Passenger == 1, "Front_Passenger","Rear_Passenger"))))
+
+dmy <- dummyVars("~Casualty_Location",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+# Encode sex of casualty
+test_set$Sex_of_Casualty <- as.factor(ifelse(test_set$Sex_of_Casualty == 1, "Male_cas",
+                                      ifelse(test_set$Sex_of_Casualty == 2, "Female_cas",NA)))
+
+dmy <- dummyVars("~Sex_of_Casualty",data=test_set, fullRank = TRUE, levelsOnly = TRUE)
+trfs <- data.frame(predict(dmy,newdata=test_set))
+test_set <- bind_cols(test_set, trfs)
+
+### Change casualty severity to a factor
+
+test_set$Casualty_Severity <- as.factor(test_set$Casualty_Severity)
+```
+
+```{r final model, include = FALSE}
+# Run the individual models against the test data
+test_set <- test_set %>% select("Casualty_Severity", key_vars)
+
+rf_class_test <- predict(rf_fit, test_set, type = "raw")
+class_pred <- data.frame(rf = ifelse(rf_class_test == 0, 0, 1))
+
+test_scale <- scale(test_set[,2:ncol(test_set)])
+test_scale <- data.frame(Casualty_Severity = test_set$Casualty_Severity, test_scale)
+knn_class_test <- predict(knn_fit, test_scale, type = "raw")
+class_pred <- data.frame(class_pred, knn = ifelse(knn_class_test == 0, 0, 1))
+
+log_prob_test <- predict(log_fit, newdata = test_set, type = "response")
+log_class_test <- as.factor(ifelse(log_prob_test > 0.5, 1, 0))
+class_pred <- data.frame(class_pred, log = ifelse(log_class_test == 0, 0, 1))
+
+lda_class_test <- predict(lda_fit, test_set, type = "raw")
+class_pred <- data.frame(class_pred, lda = ifelse(lda_class_test == 0, 0, 1))
+
+svm_class_test <- predict(svm_fit, test_set, type = "raw")
+class_pred <- data.frame(class_pred, svm = ifelse(svm_class_test == 0, 0, 1))
+
+# Build the ensemble
+class_pred <- class_pred %>% mutate(maj_vote = as.factor(ifelse(rf + knn + log + lda + svm >= 3, 1, 0)),
+                                    vote_count = as.factor(rf + knn + log + lda + svm))
+
+cm <- confusionMatrix(data = class_pred$maj_vote, reference = test_set$Casualty_Severity, positive = "1")
+```
+
+```{r final model outcome, echo = FALSE}
+# CM and summary results for final model
+confusion <- data.frame(matrix(data = cm$table, ncol = 2))
+rownames(confusion) <- c("Prediction 0","Prediction 1" )
+colnames(confusion) <- c("Reference 0", "Reference 1")
+confusion %>% KableTidy
+
+results_final <- data.frame(Overall = cm$overall[1], Sensitivity = cm$byClass[1], Specificity = cm$byClass[2],
+          Balanced = cm$byClass[11], Pos_pred = cm$byClass[3]) 
+
+row.names(results_final) <- NULL
+results_final %>% KableTidy
+```
+
+The charts below show the observations in the test split by the number of votes for a positive prediction (a seriously injured casualty) and the actual casualty severity.
+
+As we saw previously, the proportion does rise as more positive predictions are made, but still only `r sum(class_pred$vote_count == 5 & test_set$Casualty_Severity == 1) * 100 /sum(class_pred$vote_count == 5)`% when all 5 call it serious. Equally `r sum(class_pred$vote_count == 0 & test_set$Casualty_Severity == 1) * 100 /sum(class_pred$vote_count == 0)`% of casualties where all models called it zero were actually seriously injured. The former is the more challenging issue as it means the precision is poor.
+
+```{r Final results charts, echo = FALSE, fig.width = 7, fig.height=3, fig.align = 'center', fig.cap = 'Distribution of casualties by number of positive "votes" and actual severity'}
+# Charts showing test set observations, split by number of models calling a serious injury and the true severity
+ens_class_count <- data.frame(pred = class_pred$vote_count, actual = test_set$Casualty_Severity)
+
+chart1 <- ens_class_count %>% ggplot(aes(x = pred)) + geom_bar(aes(fill = actual), position = "fill") +
+  scale_fill_discrete(name = "Actual \nseverity") +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid")) +
+  labs(x = "Number of positive predictions", y = "Proportion of casualties")
+
+chart2 <- ens_class_count %>% ggplot(aes(x = pred)) + geom_bar(aes(fill = actual)) +
+  scale_fill_discrete(name = "Actual \nseverity") +
+  theme(panel.background = element_rect(fill = chart_back, colour = "black", size = 0.5, linetype = "solid")) +
+  labs(x = "Number of positive predictions", y = "Number of casualties")
+
+grid.arrange(chart1, chart2, ncol = 2)
+```
+
+\pagebreak
+
+# 7. Conclusions and next steps
+
+This analysis has identified the key factors that affected the severity of injuries sustained by casualties of road traffic accidents in the UK in 2014. Predictions have been made against an unseen data set of data and achieved a balanced accuracy of `r cm$byClass[11]*100`%, which is a reasonable result. The low prevalence of serious injuries however, means that this is not sufficient to be of practical use. Indeed only `r cm$byClass[3]*100`% of the predictions for serious injuries were actually serious (the precision score).
+
+The final model used was an ensemble of three different machine learning algorithms and we observed that many seriously injured casualties were predicted to be non serious by every model. Similarly many casualties with non serious injuries were predicted to be serious by every model.
+
+If it were possible to access additional data, the following may be helpful to improve the model predictions:
+
+-   *Actual speed of impact* -- we already know the speed limit for the road on which the accident occurred, but it would be more insightful to know the speed at which the collision occurred. It could be the case that the vehicle(s) were travelling in excess of the legal speed limit. Equally it be true that the vehicle(s) braked sufficiently to avoid a high speed impact.
+
+-   *Impairment of drivers* -- some accidents involve drivers who are distracted by a mobile phone or are under the influence of alcohol or drugs. This could be a factor in the severity of injuries, if the actions of these driver(s) are not as effective as those who are not impaired.
+
+-   *Road worthiness of vehicles* -- it would be useful to understand whether unroadworthy vehicles result in more serious injuries during a collision. An unsafe car could brake or steer badly, leading to a more serious collision and a higher likelihood of serious injuries. It could also be the case that an unroadworthy car is less structurally sound and fails to provide adequate protection to those inside it.
+
+-   *Use of seat belts* - it is reasonable to believe that being involved in an accident when not wearing a seat belt would lead to more severe injuries, it would be useful to include this in our modelling.
+
+-   *Underlying health conditions of casualties* -- some casualties may have underlying health issues (e.g. be more susceptible to a heart attack) or be taking medication (e.g. blood thinners) that could increase the likelihood of sustaining serious injuries in a collision.
+
+It may also be insightful to extend the analysis with the current data features by considering additional machine learning algorithms (e.g boosting techniques, including AdaBoost), alternative time periods or different types of accident (e.g. single vehicle accidents).
+
+```{r run time, echo = FALSE}
+end_tm <- Sys.time()
+end_tm - start_tm
+```
