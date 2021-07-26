@@ -198,8 +198,7 @@ At this point the data is split into a training set and a test set. The former w
 ```{r create the test and train sets, include = FALSE}
 ### Change casualty severity to 2 levels
 full_data <- full_data %>% 
-  mutate(Casualty_Severity = as.factor(ifelse(Casualty_Severity == 3, 0, 1))) #%>%   
-  #filter(month(Date) == 1)
+  mutate(Casualty_Severity = as.factor(ifelse(Casualty_Severity == 3, 0, 1))) 
 
 # Replace all the missing data values with NAs (includes unknown, not known etc)
 full_data[full_data == -1] <- NA
